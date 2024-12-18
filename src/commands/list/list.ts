@@ -3,9 +3,13 @@ import path from "path";
 import chalk from "chalk";
 import CliTable3 from "cli-table3";
 import stripAnsi from "strip-ansi";
-import timestampLogger from "../utils/timestampLogger.js";
+import timestampLogger from "../../utils/timestampLogger.js";
 
 //TODO : only a directory can be specified for --outDir
+//TODO : use promise all for filterContents
+//TODO : filterContents should be the only check if content is directory
+//TODO : fileCount and folderCount should be global
+//TODO : Cross check no recur mode
 
 const validOptions = new Set([
   "--dir",
@@ -19,65 +23,75 @@ const validOptions = new Set([
   "--o",
 ]);
 
-let append = false;
-const outputContentToFile = (contents: string, directory: string) => {
-  fs.writeFileSync(
-    directory,
-    `
-    ${stripAnsi(contents)} 
-   
-    `,
-    { flag: append ? "a" : "w" }
-  );
-  append = true;
-};
+let logAcc = "";
+let fileCount = 0;
+let folderCount = 0;
 
-/**
- * Filters out files specified by the user
- */
-const filterContents = (
-  extensionString: string,
+const filterContents = async (
+  extensionToFilterString: string,
   contents: string[],
-  exclude: Set<string>,
+  directoryToExclude: Set<string>,
   directory: string
 ) => {
-  const extensions = extensionString
-    ? new Set(extensionString.split(","))
+  const extensionsToFilter = extensionToFilterString
+    ? new Set(extensionToFilterString.split(","))
     : new Set([]);
 
-  return contents.filter((content) => {
+  const contentsPromise = contents.map((content) => {
     try {
-      const dirPath = path.resolve(directory, content);
-      const isDirectory = fs.lstatSync(dirPath).isDirectory();
-      if (
-        (!isDirectory && !extensions.has(path.extname(content))) ||
-        (isDirectory && !exclude.has(path.basename(content)))
-      ) {
-        return true;
-      }
+      const contentPath = path.resolve(directory, content);
+      return fs.promises.lstat(contentPath);
     } catch (error) {
       throw new Error(
         (error as Error).message + " Error occurred when filtering contents"
       );
     }
   });
+
+  const resolvedContentsPromise = await Promise.all(contentsPromise);
+  return contents
+    .map((content, index) => {
+      try {
+        const contentPath = path.resolve(directory, content);
+        const isDirectory = resolvedContentsPromise[index].isDirectory(); //fs.lstatSync(contentPath).isDirectory();
+        if (!isDirectory && !extensionsToFilter.has(path.extname(content))) {
+          fileCount++;
+          return { contentPath, type: "file" };
+        } else if (
+          isDirectory &&
+          !directoryToExclude.has(path.basename(content))
+        ) {
+          folderCount++;
+          return { contentPath, type: "folder" };
+        } else {
+          return "";
+        }
+      } catch (error) {
+        throw new Error(
+          (error as Error).message + " Error occurred when filtering contents"
+        );
+      }
+    })
+    .filter(Boolean);
 };
 
-const logContents = (directory: string, contents: string[], outDir: string) => {
+const logContents = (
+  directory: string,
+  contents: { contentPath: string; type: string }[]
+) => {
   const table = new CliTable3({
     head: [chalk.bold.blue(directory)],
     style: {
       head: ["name"],
     },
   });
+
   if (contents.length) {
     contents.forEach((content, index) => {
       try {
-        const dirPath = path.join(directory, content);
-        const isDirectory = fs.lstatSync(dirPath).isDirectory();
-        const contentName = path.basename(content);
+        const contentName = path.basename(content.contentPath);
         let coloredContentName;
-        if (isDirectory) {
+        if (content.type === "folder") {
           coloredContentName = chalk.blueBright.bold(
             `[${index + 1}] 📁 ${contentName}`
           );
@@ -96,13 +110,15 @@ const logContents = (directory: string, contents: string[], outDir: string) => {
     });
     const tableToString = table.toString();
     console.log(tableToString);
-    outDir && outputContentToFile(tableToString, outDir);
+    logAcc += `
+    ${stripAnsi(tableToString)} `;
     return tableToString;
   } else {
     table.push([chalk.yellow("⚠ No contents were found")]);
     const tableToString = table.toString();
     console.log(tableToString);
-    outDir && outputContentToFile(tableToString, outDir);
+    logAcc += `
+    ${stripAnsi(tableToString)} `;
     return tableToString;
   }
 };
@@ -114,67 +130,41 @@ ${folderCount} ${chalk.blueBright.bold("📁 Folders")}
   `);
 };
 
-const countContents = (
-  contents: string[],
-  fileCount: number,
-  folderCount: number,
-  directory: string,
-  exclude: Set<string>
-) => {
-  contents.forEach((content) => {
-    try {
-      const subDirectory = path.join(directory, content);
-      const stat = fs.lstatSync(subDirectory);
-      if (stat.isDirectory() && !exclude.has(content)) {
-        folderCount++;
-      } else {
-        if (!stat.isDirectory()) fileCount++;
-      }
-    } catch (error) {
-      throw new Error(
-        (error as Error).message + " Error occurred when searching for contents"
-      );
-    }
-  });
-  return { fileCount, folderCount };
-};
-
-const recursivelySearchContents = (
-  contents: string[],
+const recursivelySearchContents = async (
+  contents: string[] | { contentPath: string; type: string }[],
   directory: string,
   exclude: Set<string>,
   filter: string,
-  outDir: string,
-  acc: string[]
+  outDir: string
 ) => {
-  contents = filterContents(filter, contents as string[], exclude, directory);
-  logContents(directory, contents, outDir);
-  contents.forEach((content) => {
+  contents = (await filterContents(
+    filter,
+    contents as string[],
+    exclude,
+    directory
+  )) as { contentPath: string; type: string }[];
+
+  logContents(directory, contents);
+
+  for (const content of contents) {
     try {
-      const subDirectory = path.join(directory, content);
-      //acc.push(subDirectory);
-      const stat = fs.lstatSync(subDirectory);
-      if (stat.isDirectory() && !exclude.has(content)) {
-        acc.push("folder");
-        const contents = fs.readdirSync(subDirectory);
-        recursivelySearchContents(
-          contents,
+      const subDirectory = path.resolve(directory, content.contentPath);
+      if (content.type === "folder") {
+        const subContents = fs.readdirSync(subDirectory);
+        await recursivelySearchContents(
+          subContents,
           subDirectory,
           exclude,
           filter,
-          outDir,
-          acc
+          outDir
         );
-      } else {
-        acc.push("file");
       }
     } catch (error) {
       throw new Error(
         (error as Error).message + " Error occurred when searching for contents"
       );
     }
-  });
-  return acc;
+  }
 };
 
 const list = async () => {
@@ -205,34 +195,36 @@ const list = async () => {
     }
 
     let contents = fs.readdirSync(directory);
-    append = false;
     if (recursive) {
-      const result = recursivelySearchContents(
+      await recursivelySearchContents(
         contents,
         directory,
         exclude,
         filter,
-        outDir,
-        []
+        outDir
       );
-
-      const filesCountResult = result.filter((content) => content === "file");
-
-      logContentCount(
-        filesCountResult.length,
-        result.length - filesCountResult.length
-      );
+      outDir && fs.writeFileSync(outDir, logAcc);
+      logAcc = "";
+      logContentCount(fileCount, folderCount);
     } else {
-      contents = filterContents(
+      const result = (await filterContents(
         filter,
         contents as string[],
         exclude,
         directory
-      );
-      logContents(directory, contents, outDir);
-      const countResult = countContents(contents, 0, 0, directory, exclude);
-      logContentCount(countResult.fileCount, countResult.folderCount);
+      )) as {
+        contentPath: string;
+        type: string;
+      }[];
+
+      logContents(directory, result);
+      outDir && fs.writeFileSync(outDir, logAcc);
+      logAcc = "";
+      logContentCount(fileCount, folderCount);
     }
+
+    fileCount = 0;
+    folderCount = 0;
   } catch (error) {
     console.log(chalk.red((error as Error).message));
   }
