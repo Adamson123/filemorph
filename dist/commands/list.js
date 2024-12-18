@@ -16,13 +16,13 @@ const validOptions = new Set([
     "--outDir",
     "--o",
 ]);
-let flag = false;
+let append = false;
 const outputContentToFile = (contents, directory) => {
     fs.writeFileSync(directory, `
     ${stripAnsi(contents)} 
    
-    `, flag ? { flag: "a" } : { flush: true });
-    flag = true;
+    `, { flag: append ? "a" : "w" });
+    append = true;
 };
 /**
  * Filters out files specified by the user
@@ -155,10 +155,8 @@ const list = async () => {
             throw { error: "Please specify the directory" };
         }
         let contents = fs.readdirSync(directory);
-        flag = false;
+        append = false;
         if (recursive) {
-            let fileCount = 0;
-            let folderCount = 0;
             const result = recursivelySearchContents(contents, directory, exclude, filter, outDir, []);
             const filesCountResult = result.filter((content) => content === "file");
             logContentCount(filesCountResult.length, result.length - filesCountResult.length);

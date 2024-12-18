@@ -19,7 +19,7 @@ const validOptions = new Set([
   "--o",
 ]);
 
-let flag = false;
+let append = false;
 const outputContentToFile = (contents: string, directory: string) => {
   fs.writeFileSync(
     directory,
@@ -27,9 +27,9 @@ const outputContentToFile = (contents: string, directory: string) => {
     ${stripAnsi(contents)} 
    
     `,
-    flag ? { flag: "a" } : { flush: true }
+    { flag: append ? "a" : "w" }
   );
-  flag = true;
+  append = true;
 };
 
 /**
@@ -205,10 +205,8 @@ const list = async () => {
     }
 
     let contents = fs.readdirSync(directory);
-    flag = false;
+    append = false;
     if (recursive) {
-      let fileCount = 0;
-      let folderCount = 0;
       const result = recursivelySearchContents(
         contents,
         directory,
