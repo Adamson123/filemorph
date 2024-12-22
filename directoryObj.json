@@ -1,0 +1,18 @@
+{
+  "name": "filemorph",
+  "type": "folder",
+  "files": [
+    { "name": ".git", "type": "folder" },
+    { "name": ".gitignore", "type": "file" },
+    { "name": "directoryObj.json", "type": "file" },
+    { "name": "dist", "type": "folder" },
+    { "name": "jest.config.ts", "type": "file" },
+    { "name": "junk-folder", "type": "folder" },
+    { "name": "package-lock.json", "type": "file" },
+    { "name": "package.json", "type": "file" },
+    { "name": "README.md", "type": "file" },
+    { "name": "src", "type": "folder" },
+    { "name": "tests", "type": "folder" },
+    { "name": "tsconfig.json", "type": "file" }
+  ]
+}

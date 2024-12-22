@@ -4,11 +4,9 @@ import chalk from "chalk";
 import CliTable3 from "cli-table3";
 import stripAnsi from "strip-ansi";
 import timestampLogger from "../../utils/timestampLogger.js";
-//TODO : only a directory can be specified for --outDir
-//TODO : use promise all for filterContents
-//TODO : filterContents should be the only check if content is directory
-//TODO : fileCount and folderCount should be global
-//TODO : Cross check no recur mode
+//TODO : filterAndExcludeContents should be the only check if content is directory
+//TODO : Improve error messages
+//:
 const validOptions = new Set([
     "--dir",
     "--d",
@@ -23,11 +21,11 @@ const validOptions = new Set([
 let logAcc = "";
 let fileCount = 0;
 let folderCount = 0;
-const filterContents = async (extensionToFilterString, contents, directoryToExclude, directory) => {
+const filterAndExcludeContents = async (extensionToFilterString, contents, directoryToExclude, directory) => {
     const extensionsToFilter = extensionToFilterString
         ? new Set(extensionToFilterString.split(","))
         : new Set([]);
-    const contentsPromise = contents.map((content) => {
+    const contentsStatPromise = contents.map((content) => {
         try {
             const contentPath = path.resolve(directory, content);
             return fs.promises.lstat(contentPath);
@@ -36,19 +34,20 @@ const filterContents = async (extensionToFilterString, contents, directoryToExcl
             throw new Error(error.message + " Error occurred when filtering contents");
         }
     });
-    const resolvedContentsPromise = await Promise.all(contentsPromise);
+    const resolvedContentsStatPromise = await Promise.all(contentsStatPromise);
     return contents
         .map((content, index) => {
         try {
-            const contentPath = path.resolve(directory, content);
-            const isDirectory = resolvedContentsPromise[index].isDirectory(); //fs.lstatSync(contentPath).isDirectory();
+            const isDirectory = resolvedContentsStatPromise[index].isDirectory();
             if (!isDirectory && !extensionsToFilter.has(path.extname(content))) {
                 fileCount++;
+                const contentPath = path.resolve(directory, content);
                 return { contentPath, type: "file" };
             }
             else if (isDirectory &&
                 !directoryToExclude.has(path.basename(content))) {
                 folderCount++;
+                const contentPath = path.resolve(directory, content);
                 return { contentPath, type: "folder" };
             }
             else {
@@ -61,6 +60,9 @@ const filterContents = async (extensionToFilterString, contents, directoryToExcl
     })
         .filter(Boolean);
 };
+/**
+ * Logs a directory contents in a table form
+ */
 const logContents = (directory, contents) => {
     const table = new CliTable3({
         head: [chalk.bold.blue(directory)],
@@ -101,14 +103,20 @@ const logContents = (directory, contents) => {
         return tableToString;
     }
 };
+/**
+ * Logs the amount of files and folders discovered in the directory
+ */
 const logContentCount = (fileCount, folderCount) => {
     console.log(`
 ${fileCount} ${chalk.magenta.yellow("📄 Files")} 
 ${folderCount} ${chalk.blueBright.bold("📁 Folders")}
   `);
 };
+/**
+ * recursively search for contents in directories
+ */
 const recursivelySearchContents = async (contents, directory, exclude, filter, outDir) => {
-    contents = (await filterContents(filter, contents, exclude, directory));
+    contents = (await filterAndExcludeContents(filter, contents, exclude, directory));
     logContents(directory, contents);
     for (const content of contents) {
         try {
@@ -123,14 +131,35 @@ const recursivelySearchContents = async (contents, directory, exclude, filter, o
         }
     }
 };
+/**
+ * Output log to a file in the specified directory
+ */
+const outputLogToAFile = (outDir) => {
+    if (outDir) {
+        if (!fs.lstatSync(outDir).isDirectory()) {
+            logAcc = "";
+            throw new Error("Error please specify a directory as an output path for the log file");
+        }
+        fs.writeFileSync(`${outDir}/list-log-${new Date().getTime()}.md`, logAcc);
+        logAcc = "";
+    }
+};
+/**
+ * List files in a dir base on provided options
+ */
 const list = async () => {
     const options = {};
     const processArgv = process.argv;
     processArgv.forEach((option, index) => {
         if (validOptions.has(option)) {
-            const fieldValue = processArgv[index + 1];
-            if (!validOptions.has(fieldValue)) {
-                options[option] = processArgv[index + 1];
+            const nextField = processArgv[index + 1];
+            if (!validOptions.has(nextField) ||
+                option === "--recursion" ||
+                option === "--r") {
+                options[option] = nextField;
+                //As far as --recursion or --r is included among the options with or without a value, go recursive mode!!!
+                if (option === "--recursion" || option === "--r")
+                    options[option] = "true";
             }
         }
     });
@@ -147,16 +176,14 @@ const list = async () => {
         let contents = fs.readdirSync(directory);
         if (recursive) {
             await recursivelySearchContents(contents, directory, exclude, filter, outDir);
-            outDir && fs.writeFileSync(outDir, logAcc);
-            logAcc = "";
             logContentCount(fileCount, folderCount);
+            outputLogToAFile(outDir);
         }
         else {
-            const result = (await filterContents(filter, contents, exclude, directory));
+            const result = (await filterAndExcludeContents(filter, contents, exclude, directory));
             logContents(directory, result);
-            outDir && fs.writeFileSync(outDir, logAcc);
-            logAcc = "";
             logContentCount(fileCount, folderCount);
+            outputLogToAFile(outDir);
         }
         fileCount = 0;
         folderCount = 0;
