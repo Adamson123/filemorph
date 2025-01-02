@@ -3,301 +3,328 @@ import path from "path";
 import chalk from "chalk";
 import CliTable3 from "cli-table3";
 import stripAnsi from "strip-ansi";
-import timestampLogger from "../utils/timestampLogger.js";
-import getAndAssignOptions from "../utils/getAndAssignOptions.js";
+import { Queue } from "../utils/queue.js";
+import splitSafely from "../utils/splitSafely.js";
+import { FilemorphError } from "../utils/errorHandler.js";
+import { listOptions } from "../options/index.js";
+import { logContentCount, logError } from "../utils/logger.js";
+import { CommonCommandOptions } from "../types/index.js";
 
-//TODO : Improve error messages
-//TODO : And options to specify whether to output as table, folder structure or json
-//TODO : Only acc obj if output-as is json
+//TODO : Improve error message
 
+// Variables to track log data
 let tableLogAcc = "";
 let fileCount = 0;
 let folderCount = 0;
 
-interface ContentPathAndType {
-  contentPath: string;
-  type: string;
+interface ContentType {
+  path: string;
+  type: "file" | "folder";
+  name: string;
+  contents?: any[];
 }
 
-const filterAndExcludeContents = async (
-  extensionToFilterString: string,
-  contents: string[],
-  directoryToExclude: Set<string>,
-  directory: string
-) => {
-  const extensionsToFilter = extensionToFilterString
-    ? new Set(extensionToFilterString.split(","))
-    : new Set([]);
-
-  const contentsStatPromise = contents.map((content) => {
-    try {
-      const contentPath = path.resolve(directory, content);
-      return fs.promises.lstat(contentPath);
-    } catch (error) {
-      throw new Error(
-        (error as Error).message + " Error occurred when filtering contents"
-      );
-    }
-  });
-
-  const resolvedContentsStatPromise = await Promise.all(contentsStatPromise);
-  return contents
-    .map((content, index) => {
-      try {
-        const isDirectory = resolvedContentsStatPromise[index].isDirectory();
-        if (!isDirectory && !extensionsToFilter.has(path.extname(content))) {
-          fileCount++;
-          const contentPath = path.resolve(directory, content);
-          return { contentPath, type: "file" };
-        } else if (
-          isDirectory &&
-          !directoryToExclude.has(path.basename(content))
-        ) {
-          folderCount++;
-          const contentPath = path.resolve(directory, content)  ;
-          return { contentPath, type: "folder" };
-        } else {
-          return "";
-        }
-      } catch (error) {
-        throw new Error(
-          (error as Error).message + " Error occurred when filtering contents"
-        );
-      }
-    })
-    .filter(Boolean);
-};
+interface Filters {
+  excludeFiles: Set<string>;
+  includeFiles: Set<string>;
+  excludeFolders: Set<string>;
+  includeFolders: Set<string>;
+}
 
 /**
- * Logs a directory contents in a table form
+ * Filter and exclude contents from a directory.
  */
-const logContents = (directory: string, contents: ContentPathAndType[]) => {
-  const table = new CliTable3({
-    head: [chalk.bold.blue(directory)],
-    style: {
-      head: ["name"],
-    },
-  });
 
-  if (contents.length) {
-    contents.forEach((content, index) => {
-      //chalk.green(`[${index}]`) + " " +
-      try {
-        const contentName = path.basename(content.contentPath);
-        let coloredContentName;
-        if (content.type === "folder") {
-          coloredContentName = chalk.blueBright.bold(
-            `[${index + 1}] 📁 ${contentName}`
-          );
+const getContentsStat = async (contents: string[], directory: string) => {
+  try {
+    const contentsStatPromise = contents.map((content) =>
+      fs.promises.lstat(path.resolve(directory, content))
+    );
+
+    const resolvedContentsStatPromise = await Promise.all(contentsStatPromise);
+
+    return contents
+      .map((content, index) => {
+        const isDirectory = resolvedContentsStatPromise[index].isDirectory();
+        if (isDirectory) {
+          return {
+            path: path.resolve(directory, content),
+            type: "folder",
+            name: path.basename(content),
+            contents: [],
+          };
         } else {
-          coloredContentName = chalk.magenta.yellow(
-            `[${index + 1}] 📄 ${contentName}`
-          );
+          return {
+            path: path.resolve(directory, content),
+            type: "file",
+            name: path.basename(content),
+          };
         }
-        table.push([coloredContentName]);
-      } catch (error) {
-        throw new Error(
-          (error as Error).message + " Error occurred when logging contents"
-        );
-      }
-    });
-    const tableToString = table.toString();
-    console.log(tableToString);
-    tableLogAcc += `
-    ${stripAnsi(tableToString)} `;
-    return tableToString;
-  } else {
-    table.push([chalk.yellow("⚠ No contents were found")]);
-    const tableToString = table.toString();
-    console.log(tableToString);
-    tableLogAcc += `
-    ${stripAnsi(tableToString)} `;
-    return tableToString;
+      })
+      .filter(Boolean) as ContentType[];
+  } catch (error) {
+    throw new FilemorphError(
+      `Error occurred while getting files stat: ${(error as Error).message}`
+    );
+  }
+};
+
+interface FilterAndExcludeContents extends Filters {
+  contents: string[];
+  directory: string;
+}
+
+const filterAndExcludeContents = async (params: FilterAndExcludeContents) => {
+  const {
+    excludeFiles,
+    includeFiles,
+    excludeFolders,
+    includeFolders,
+    contents,
+    directory,
+  } = params;
+  try {
+    const contentsStat = await getContentsStat(contents, directory);
+    return contentsStat
+      .map((content) => {
+        if (
+          content.type === "folder" &&
+          !excludeFolders.has(path.basename(content.path)) &&
+          (!includeFolders.size ||
+            includeFolders.has(path.basename(content.path)))
+        ) {
+          folderCount++;
+          return content;
+        } else if (
+          content.type === "file" &&
+          !excludeFiles.has(path.extname(content.path)) &&
+          (!includeFiles.size || includeFiles.has(path.extname(content.path)))
+        ) {
+          fileCount++;
+          return content;
+        }
+        return null;
+      })
+      .filter(Boolean) as ContentType[];
+  } catch (error) {
+    throw new FilemorphError(
+      `Failed to filter and exclude contents: ${(error as Error).message}`
+    );
   }
 };
 
 /**
- * Logs the amount of files and folders discovered in the directory
+ * Log directory contents in a table format.
  */
-const logContentCount = (fileCount: number, folderCount: number) => {
-  console.log(`
-${fileCount} ${chalk.magenta.yellow("📄 Files")} 
-${folderCount} ${chalk.blueBright.bold("📁 Folders")}
-  `);
+
+const logContents = (directory: string, contents: ContentType[]) => {
+  const table = new CliTable3({
+    head: [chalk.bold.blue(directory)],
+    style: { head: ["name"] },
+  });
+
+  if (contents.length) {
+    contents.forEach((content, index) => {
+      const contentName = path.basename(content.path);
+      const coloredContentName =
+        content.type === "folder"
+          ? chalk.blueBright.bold(`[${index + 1}] 📁 ${contentName}`)
+          : chalk.yellow(`[${index + 1}] 📄 ${contentName}`);
+      table.push([coloredContentName]);
+    });
+  } else {
+    table.push([chalk.yellow("⚠ No contents were found")]);
+  }
+
+  const tableToString = table.toString();
+  console.log(tableToString);
+  tableLogAcc += `\n${stripAnsi(tableToString)}\n`;
 };
 
 /**
- * Output log to a file in the specified directory
+ * Output logs to a file.
  */
+
 const outputLogToAFile = (
   outputDir: string,
   outputAs: string,
   directoryObj: object
 ) => {
-  if (outputDir) {
-    if (!fs.lstatSync(outputDir).isDirectory()) {
-      tableLogAcc = "";
-      throw new Error(
-        "Error please specify a directory as an output path for the log file"
+  try {
+    if (outputDir) {
+      const outputExt = outputAs === "json" ? ".json" : ".md";
+      const outputPath = path.resolve(
+        outputDir,
+        `list-log-${Date.now()}${outputExt}`
       );
-    }
-    const outputExt = outputAs === "json" ? ".json" : ".md";
-    const outputPath = `${outputDir}/list-log-${new Date().getTime()}${outputExt}`;
-    console.log({ outputPath });
 
-    if (outputAs === "json") {
-      fs.writeFileSync(outputPath, JSON.stringify(directoryObj));
-    } else {
-      fs.writeFileSync(outputPath, tableLogAcc);
-    }
-
-    console.log(
-      "Log outputed to " + chalk.magenta.yellow(path.resolve(outputPath))
-    );
-    tableLogAcc = "";
-  }
-};
-
-/**
- * recursively search for contents in directories
- */
-const recursivelySearchContents = async (
-  contents: string[] | ContentPathAndType[],
-  directory: string,
-  exclude: Set<string>,
-  filter: string,
-  outputDir: string,
-  directoryFiles: any[]
-) => {
-  contents = (await filterAndExcludeContents(
-    filter,
-    contents as string[],
-    exclude,
-    directory
-  )) as ContentPathAndType[];
-
-  logContents(directory, contents);
-
-  for (const content of contents) {
-    try {
-      const subDirectory = path.resolve(directory, content.contentPath);
-      const { contentPath, type } = content;
-      if (content.type === "folder") {
-        const subContents = fs.readdirSync(subDirectory);
-        const subDirectoryObj = {
-          name: path.basename(contentPath),
-          path: contentPath.toString(),
-          type,
-          files: [],
-        };
-        await recursivelySearchContents(
-          subContents,
-          subDirectory,
-          exclude,
-          filter,
-          outputDir,
-          subDirectoryObj.files
-        );
-        directoryFiles.push(subDirectoryObj);
+      if (outputAs === "json") {
+        fs.writeFileSync(outputPath, JSON.stringify(directoryObj, null, 2));
       } else {
-        console.log({ path: contentPath });
-
-        directoryFiles.push({
-          name: path.basename(contentPath),
-          path: contentPath.toString(),
-          type,
-        });
+        fs.writeFileSync(outputPath, tableLogAcc);
       }
-    } catch (error) {
-      throw new Error(
-        (error as Error).message + " Error occurred when searching for contents"
-      );
+
+      console.log(`Log outputted to ${chalk.magenta.yellow(outputPath)}`);
+      tableLogAcc = "";
     }
+  } catch (error) {}
+};
+
+interface IterativelySearchContentsParams extends Filters {
+  recursive: number;
+  directory: string; // The starting directory path
+}
+const queue = new Queue<ContentType>();
+// Define an async function to iteratively search directory contents
+const iterativelySearchContents = async (
+  params: IterativelySearchContentsParams
+) => {
+  let {
+    recursive,
+    directory,
+    excludeFiles,
+    includeFiles,
+    excludeFolders,
+    includeFolders,
+  } = params;
+  // Create a root directory object
+  const rootDir: ContentType = {
+    name: path.basename(directory),
+    path: directory,
+    type: "folder",
+    contents: [],
+  };
+  queue.enqueue(rootDir); // Add the root directory to the queue
+  // Process directories until the queue is empty
+  try {
+    while (!queue.isEmpty()) {
+      const currentDir = queue.dequeue(); // Get the next directory to process
+      if (!currentDir) continue; // Skip if dequeue returns null (shouldn't happen)
+      // Read the contents of the current directory
+
+      const depth = path
+        .relative(rootDir.path, currentDir.path)
+        .split(path.sep).length;
+
+      //check if the directory we are trying to read from  is in the depth limit
+      if (depth > recursive) {
+        continue;
+      }
+      const contents = fs.readdirSync(currentDir.path);
+      // Filter and exclude contents based on provided parameters
+      const filteredContents = await filterAndExcludeContents({
+        excludeFiles,
+        excludeFolders,
+        includeFiles,
+        includeFolders,
+        contents,
+        directory: currentDir.path,
+      });
+
+      // Log the filtered contents of the current directory
+      logContents(currentDir.path, filteredContents);
+
+      // Process each item in the filtered contents
+      for (const content of filteredContents) {
+        if (content.type === "folder") {
+          // If it's a folder, create a new subdirectory object
+          const subDir: ContentType = {
+            ...content,
+            contents: [],
+          };
+          queue.enqueue(subDir); // Add the subdirectory to the queue for processing
+          currentDir.contents?.push(subDir); // Add subdirectory to current directory's contents
+        } else {
+          // If it's a file, add it directly to the current directory's contents
+          currentDir.contents?.push(content);
+        }
+      }
+      //  recursive--;
+    }
+    // Return the root directory object with all processed contents
+    return rootDir;
+  } catch (error) {
+    //handleContentAccessError(error, directory);
+    throw new FilemorphError(
+      `Error while searching for contents: ${(error as Error).message}`
+    );
   }
 };
 
+interface ListParams extends CommonCommandOptions {
+  outputDir?: string;
+  outputAs?: string;
+}
 /**
- * List files in a dir base on provided options
+ * Main function to list files and directories.
  */
-const list = async () => {
-  const commandOptions = new Set([
-    "--dir",
-    "-d",
-    "--recursive",
-    "-r",
-    "--filter",
-    "-f",
-    "--exclude",
-    "-e",
-    "--output-dir",
-    "-o",
-    "--output-as",
-  ]);
-
-  const options: DynamicObj = {};
-  getAndAssignOptions(commandOptions, options, new Set(["--recursion", "--r"]));
+const list = async (params: ListParams | null = null) => {
+  const options = listOptions().opts();
+  const directory = params?.directory || options.directory || process.cwd();
+  let recursive = params?.recursive || options.recursive;
+  if (recursive) {
+    const canBeConvertedToNum =
+      !isNaN(Number(recursive)) && typeof recursive !== "boolean";
+    recursive = canBeConvertedToNum ? Number(recursive) : Infinity;
+  }
+  //!new
+  const excludeFiles = new Set(
+    splitSafely(params?.excludeFiles, options.excludeFiles)
+  );
+  const includeFiles = new Set(
+    splitSafely(params?.includeFiles, options.includeFiles)
+  );
+  const excludeFolders = new Set(
+    splitSafely(params?.excludeFolders, options.excludeFolders)
+  );
+  const includeFolders = new Set(
+    splitSafely(params?.includeFolders, options.includeFolders)
+  );
+  const outputDir = params?.outputDir || options.outputDir || "";
+  const outputAs = params?.outputAs || options.outputAs || "table";
 
   try {
-    const directory = options["--dir"] || options["-d"] || process.cwd();
-    const recursive = options["--recursive"] || options["-r"];
-    const filter = options["--filter"] || options["-f"];
-    let exclude: string | Set<string> = options["--exclude"] || options["-e"];
-    exclude = exclude ? new Set(exclude.split(",")) : new Set([]);
-    const outputDir = options["--output-dir"] || options["-o"];
-    const outputAs = options["--output-as"] || "table";
+    let directoryObj: ContentType;
 
-    if (!directory) {
-      throw { error: "Please specify the directory" };
-    }
-
-    const contents = fs.readdirSync(directory);
-    interface DirectoryObj {
-      name: string;
-      path: string;
-      type: string;
-      files: any[];
-    }
-    const directoryObj: DirectoryObj = {
-      name: path.basename(directory),
-      path: directory.toString(),
-      type: "folder",
-      files: [],
-    };
     if (recursive) {
-      await recursivelySearchContents(
-        contents,
+      directoryObj = (await iterativelySearchContents({
+        recursive,
         directory,
-        exclude,
-        filter,
-        outputDir,
-        directoryObj.files
-      );
+        excludeFiles,
+        includeFiles,
+        excludeFolders,
+        includeFolders,
+      })) as ContentType;
 
       logContentCount(fileCount, folderCount);
       outputLogToAFile(outputDir, outputAs, directoryObj);
     } else {
-      const result = (await filterAndExcludeContents(
-        filter,
-        contents as string[],
-        exclude,
-        directory
-      )) as ContentPathAndType[];
+      const contents = fs.readdirSync(directory);
+      const result = (await filterAndExcludeContents({
+        excludeFiles,
+        excludeFolders,
+        includeFiles,
+        includeFolders,
+        contents, // as string[],
+        directory,
+      })) as ContentType[];
 
       logContents(directory, result);
       logContentCount(fileCount, folderCount);
-
-      directoryObj.files = result.map((content) => ({
-        name: path.basename(content.contentPath),
-        type: content.type,
-      }));
+      directoryObj = {
+        name: path.basename(directory),
+        path: directory,
+        type: "folder",
+        contents: result,
+      };
       outputLogToAFile(outputDir, outputAs, directoryObj);
     }
-
     fileCount = 0;
     folderCount = 0;
+    return { directoryObj };
   } catch (error) {
-    console.log(chalk.red((error as Error).message));
+    logError(error);
   }
 };
 
-export default timestampLogger(list);
+export default list;
